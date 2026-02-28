@@ -45,14 +45,26 @@ async def run_pipeline(websocket, message: str):
         await asyncio.sleep(0.05)  # small flush gap
 
     # ── Step 1: break task into subtasks ──────────────────────────────────
-    await send("📋 Breaking task into subtasks...")
+    await send("GATEWAY:📡 Gateway received message")
+    await send("PLANNER:📋 Breaking task into subtasks...")
+    await send("PLANNER:   🌐 POST openrouter.ai/api/v1/chat/completions")
+    await send(f"PLANNER:   📤 model: moonshotai/kimi-k2.5 | prompt: {message[:60]}...")
     try:
         breaker = TaskBreaker(tools_config_path=str(TOOLS_PATH))
         plan = await breaker.break_task(message)
+        await send("PLANNER:   📥 Response received from Kimi K2.5")
         steps = plan.get("execution_plan", [])
-        await send(f"   Found {len(steps)} step(s) to execute.")
+        await send(f"PLANNER:   Found {len(steps)} step(s) to execute.")
+        await send("PLANNER:")
+        await send("PLANNER:─── Execution Plan ───")
+        for s in steps:
+            await send(f"PLANNER:  {s['step']}. [{s.get('tool_to_use', '?')}] {s.get('subtask_name', '')}")
+            if s.get('description'):
+                await send(f"PLANNER:     → {s['description']}")
+        await send("PLANNER:──────────────────────")
+        await send("PLANNER:")
     except Exception as e:
-        await send(f"❌ Task planning failed: {e}")
+        await send(f"ERROR:❌ Task planning failed: {e}")
         await send("END")
         memory.close()
         return
@@ -63,7 +75,7 @@ async def run_pipeline(websocket, message: str):
     for step in steps:
         tool = step.get("tool_to_use", "")
         name = step.get("subtask_name", tool)
-        await send(f"🔧 Step {step['step']}: {name}")
+        await send(f"EXECUTOR:🔧 Step {step['step']}: {name}")
 
         result = {}
         response_code = 200
@@ -74,7 +86,7 @@ async def run_pipeline(websocket, message: str):
                 if result["error"]:
                     raise ValueError(result["error"])
                 context["video_id"] = result["video_id"]
-                await send(f"   ✓ Video ID: {result['video_id']}")
+                await send(f"EXECUTOR:   ✓ Video ID: {result['video_id']}")
 
             elif tool == "youtube_transcript_fetch_tool":
                 result = youtube_transcript_fetch_tool(context["video_id"])
@@ -82,24 +94,28 @@ async def run_pipeline(websocket, message: str):
                     raise ValueError(result["error"])
                 context["transcript_text"] = result["transcript_text"]
                 words = len(result["transcript_text"].split())
-                await send(f"   ✓ Transcript fetched ({words} words)")
+                await send(f"EXECUTOR:   ✓ Transcript fetched ({words} words)")
 
             elif tool == "transcript_summarizer_tool":
-                await send("   ⏳ Asking Kimi K2.5 to summarize...")
+                await send("EXECUTOR:   ⏳ Asking Kimi K2.5 to summarize...")
+                words_in = len(context['transcript_text'].split())
+                await send("EXECUTOR:   🌐 POST openrouter.ai/api/v1/chat/completions")
+                await send(f"EXECUTOR:   📤 model: moonshotai/kimi-k2.5 | input: {words_in} words")
                 result = await transcript_summarizer_tool(context["transcript_text"])
                 if result["error"]:
                     raise ValueError(result["error"])
                 context["summary"] = result["summary"]
-                await send("   ✓ Summary ready")
+                await send("EXECUTOR:   📥 Response received from Kimi K2.5")
+                await send("EXECUTOR:   ✓ Summary ready")
 
             else:
-                await send(f"   ⚠ Unknown tool '{tool}', skipping.")
+                await send(f"EXECUTOR:   ⚠ Unknown tool '{tool}', skipping.")
                 continue
 
         except Exception as e:
             response_code = 500
             result = {"error": str(e)}
-            await send(f"   ❌ Failed: {e}")
+            await send(f"ERROR:   ❌ Failed: {e}")
 
         # ── save step to memory ────────────────────────────────────────────
         memory.add_memory(MemoryData(
@@ -113,15 +129,15 @@ async def run_pipeline(websocket, message: str):
         ))
 
         if response_code != 200:
-            await send("⛔ Pipeline stopped due to error.")
+            await send("ERROR:⛔ Pipeline stopped due to error.")
             await send("END")
             memory.close()
             return
 
-    # ── Step 3: send final result ─────────────────────────────────────────
-    await send("💾 Results saved to memory.")
+    # ── Step 3: send final result ─────────────────────────────────────
+    await send("MEMORY:💾 Results saved to memory.")
     summary = context.get("summary", "No summary produced.")
-    await send(f"\n✅ Summary:\n{summary}")
+    await send(f"RESULT:\n✅ Summary:\n{summary}")
     await send("END")
     memory.close()
 

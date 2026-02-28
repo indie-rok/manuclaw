@@ -16,7 +16,7 @@ class TaskBreaker:
     def __init__(
         self,
         tools_config_path: str = "tools.json",
-        model: str = "openai/gpt-4o"
+        model: str = "moonshotai/kimi-k2.5"
     ):
         load_dotenv()
         self.api_key = os.getenv("OPENROUTER_KEY")
@@ -98,8 +98,13 @@ TOOLS JSON:
 
         content = data["choices"][0]["message"]["content"]
 
-        # Ensure valid JSON parsing
+        # Strip markdown code fences if LLM wrapped the JSON
+        import re
+        cleaned = content.strip()
+        fence = re.search(r'```(?:json)?\s*(.+?)\s*```', cleaned, re.DOTALL)
+        if fence:
+            cleaned = fence.group(1).strip()
         try:
-            return json.loads(content)
+            return json.loads(cleaned)
         except json.JSONDecodeError:
-            raise ValueError("LLM did not return valid JSON.")
+            raise ValueError(f"LLM did not return valid JSON. Got: {content[:300]}")

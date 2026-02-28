@@ -39,8 +39,8 @@ def youtube_transcript_fetch_tool(video_id: str, language_preference: str = "en"
     langs = [l for l in fallbacks if not (l in seen or seen.append(l))]
 
     try:
-        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=langs)
-        text = " ".join(seg["text"] for seg in transcript)
+        fetched = YouTubeTranscriptApi().fetch(video_id, languages=langs)
+        text = " ".join(seg.text for seg in fetched)
         return {"transcript_text": text, "error": None}
     except Exception as e:
         return {"transcript_text": None, "error": str(e)}
