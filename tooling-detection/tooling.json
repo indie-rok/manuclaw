@@ -1,0 +1,106 @@
+
+Conversation opened. 1 read message.
+
+Skip to content
+Using Gmail with screen readers
+2 of 1,
+744
+hackaton
+Inbox
+
+im.not.yara <im.not.yara@proton.me>
+Attachments
+5: 29 PM (16 minutes ago)
+to me
+
+Empty Message
+ 2 Attachments
+  •  Scanned by Gmail
+{
+    "tools": [
+        {
+            "name": "youtube_link_detection_tool",
+            "description": "Extracts a valid YouTube video ID from raw user input.",
+            "input_schema": {
+                "raw_input": "string"
+            },
+            "output_schema": {
+                "video_id": "string | null",
+                "error": "string | null"
+            },
+            "logic": {
+                "steps": [
+                    "Check if input contains 'youtube.com' or 'youtu.be'.",
+                    "Extract ID using regex v=([A-Za-z0-9_-]{11}).",
+                    "If shortened link, extract ID from path.",
+                    "If input matches 11-character valid ID pattern, accept directly.",
+                    "If no match, return error."
+                ]
+            }
+        },
+        {
+            "name": "youtube_transcript_fetch_tool",
+            "description": "Fetches transcript using youtube_transcript_api.",
+            "input_schema": {
+                "video_id": "string",
+                "language_preference": "string"
+            },
+            "output_schema": {
+                "transcript_text": "string | null",
+                "error": "string | null"
+            },
+            "logic": {
+                "steps": [
+                    "Initialize YouTubeTranscriptApi.",
+                    "Attempt fetch with preferred language.",
+                    "Fallback to ['en', 'en-US', 'a.en', 'fr', 'fr-FR', 'a.fr'].",
+                    "Concatenate transcript segments into single string."
+                ]
+            }
+        },
+        {
+            "name": "transcript_summarizer_tool",
+            "description": "Summarizes transcript using OpenRouter LLM.",
+            "input_schema": {
+                "transcript_text": "string",
+                "system_prompt": "string",
+                "model": "string"
+            },
+            "output_schema": {
+                "summary": "string | null",
+                "error": "string | null"
+            },
+            "logic": {
+                "steps": [
+                    "POST to https://openrouter.ai/api/v1/chat/completions.",
+                    "Include system prompt and transcript.",
+                    "Parse response JSON.",
+                    "Extract summary from choices[0].message.content."
+                ]
+            }
+        }
+    ],
+    "execution_flow": {
+        "type": "directed_graph",
+        "start": "youtube_link_detection_tool",
+        "nodes": {
+            "youtube_link_detection_tool": {
+                "on_success": "youtube_transcript_fetch_tool",
+                "on_error": "terminate"
+            },
+            "youtube_transcript_fetch_tool": {
+                "on_success": "transcript_summarizer_tool",
+                "on_error": "terminate"
+            },
+            "transcript_summarizer_tool": {
+                "on_success": "terminate",
+                "on_error": "terminate"
+            }
+        },
+        "termination_conditions": {
+            "terminate": "Return last successful output or error."
+        }
+    }
+}
+tools.json
+Displaying task_breaker.py.

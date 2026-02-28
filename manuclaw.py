@@ -70,15 +70,18 @@ class ManuclawApp(App):
         try:
             async with websockets.connect(WS_URL) as ws:
                 await ws.send(message)
-                response = await ws.recv()
-            chat_log.loading = False
-            chat_log.mount(Static(f"manuclaw: {response}", classes="agent-message"))
-            chat_log.scroll_end(animate=False)
+                # Stream status lines until gateway sends "END"
+                chat_log.loading = False
+                async for line in ws:
+                    if line == "END":
+                        break
+                    chat_log.mount(Static(line, classes="agent-message"))
+                    chat_log.scroll_end(animate=False)
         except Exception:
             chat_log.loading = False
             chat_log.mount(
                 Static(
-                    f"[Error] Cannot connect to gateway at {WS_URL}",
+                    f"Cannot connect to gateway at {WS_URL}",
                     classes="error-message",
                 )
             )
