@@ -1,10 +1,22 @@
 """manuclaw — TUI conversation interface with WebSocket client."""
 
+import importlib.util
+from datetime import datetime
+from pathlib import Path
+
 import websockets
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import VerticalScroll
-from textual.widgets import Input, Static
+from textual.widgets import DataTable, Input, Static
 from textual import work
+
+# Load memory module (hyphenated folder name)
+ROOT = Path(__file__).parent
+_spec = importlib.util.spec_from_file_location("memory_mod", ROOT / "memory" / "index.py")
+_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
+MemoryModule = _mod.MemoryModule
 
 WS_URL = "ws://localhost:8765"
 
@@ -14,6 +26,9 @@ class ManuclawApp(App):
 
     TITLE = "manuclaw"
     AUTO_FOCUS = "Input"
+    BINDINGS = [
+        Binding("ctrl+b", "toggle_memory", "Memory", show=True),
+    ]
     CSS = """
     #chat-log {
         height: 1fr;
@@ -82,6 +97,16 @@ class ManuclawApp(App):
         padding: 0 2;
     }
 
+    #memory-panel {
+        height: 40%;
+        display: none;
+        border-top: solid #c678dd;
+    }
+
+    #memory-panel DataTable {
+        height: 1fr;
+    }
+
     Input {
         dock: bottom;
     }
@@ -98,7 +123,8 @@ class ManuclawApp(App):
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="chat-log")
-        yield Static("ws://localhost:8765 | Idle", id="status-bar")
+        yield VerticalScroll(DataTable(id="memory-table", zebra_stripes=True, cursor_type="row"), id="memory-panel")
+        yield Static("ws://localhost:8765 | Idle | ctrl+b: memory", id="status-bar")
         yield Input(placeholder="Type a message...")
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -147,6 +173,32 @@ class ManuclawApp(App):
             )
             chat_log.scroll_end(animate=False)
 
+    def action_toggle_memory(self) -> None:
+        """Toggle the memory viewer panel."""
+        panel = self.query_one("#memory-panel")
+        panel.display = not panel.display
+        if panel.display:
+            self._load_memory_table()
+
+    def _load_memory_table(self) -> None:
+        """Load memory entries from SQLite into the DataTable."""
+        table = self.query_one("#memory-table", DataTable)
+        table.clear(columns=True)
+        table.add_columns("#", "Tool", "Status", "Time", "Prompt")
+        try:
+            mem = MemoryModule(user_id=1, db_path=str(ROOT / "manuclaw.db"))
+            rows = mem.get_memories(user_id=1, limit=50)
+            mem.close()
+            for row in rows:
+                # row: (id, chat_id, user_id, prompt, tool, response, response_code, timestamp)
+                rid, _cid, _uid, prompt, tool, _resp, code, ts = row
+                status = "✓" if code == 200 else "✗"
+                time_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+                prompt_short = (prompt[:40] + "…") if len(prompt) > 40 else prompt
+                table.add_row(str(rid), tool.replace("_tool", ""), status, time_str, prompt_short)
+        except Exception as e:
+            table.add_columns("Error")
+            table.add_row(str(e))
 
 if __name__ == "__main__":
     ManuclawApp().run()

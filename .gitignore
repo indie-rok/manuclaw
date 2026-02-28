@@ -13,3 +13,4 @@ build/
 *.pyc
 .sisyphus
 .env
+manuclaw.db

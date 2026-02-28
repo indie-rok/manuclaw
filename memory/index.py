@@ -62,13 +62,12 @@ class MemoryModule:
 
     def get_memories(self, user_id: int, limit=10) -> list:
         cursor = self.conn.cursor()
-        sql = f"""SELECT 
-            chat_id, user_id, prompt, tool, response, response_code, timestamp 
-            FROM memory{user_id} 
+        sql = f"""SELECT
+            id, chat_id, user_id, prompt, tool, response, response_code, timestamp
+            FROM memory{user_id}
             ORDER BY timestamp DESC LIMIT {limit}"""
         cursor.execute(sql)
-        memories = [row[0] for row in cursor.fetchall()]    
-        return memories
+        return cursor.fetchall()
 
     def close(self):
         self.conn.close()
