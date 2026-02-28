@@ -1,0 +1,24 @@
+
+
+
+
+                                                       You: second message
+
+
+
+    manuclaw: I'm manuclaw, your AI assistant. I received: second
+    message                                                                 ▁▁
+
+
+
+                                                              You: goodbye
+
+
+
+               Cannot connect to gateway at ws://localhost:8765
+
+
+
+▊▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▎
+▊  Type a message...                                                           ▎
+▊▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▎
