@@ -16,16 +16,41 @@ The loop is tool-driven (`while stop_reason == "tool_use"`), not a preplanned pi
 ## Architecture
 
 ```
-manuclaw.py (TUI)  <->  gateway/index.py (agent loop + websocket)
-                               |
-                               +-- dispatch map (5 fixed tools)
-                               |    - youtube_detect
-                               |    - youtube_transcript
-                               |    - summarize
-                               |    - write_file
-                               |    - load_skill
-                               |
-                               +-- memory/index.py (SQLite conversation history)
+┌──────────────────────┐
+│   manuclaw.py (TUI)  │
+└──────────┬───────────┘
+           │  WebSocket
+           ▼
+┌──────────────────────┐
+│ gateway/index.py     │
+│ (Gateway)            │
+└──────────┬───────────┘
+           ▼
+┌────────────────────────────────────┐
+│ Agent Loop                         │
+│ while stop_reason==tool_use        │
+│ 1) call LLM(messages, tools)       │
+│ 2) dispatch + execute tool call    │
+│ 3) append result and continue      │
+│                                    │
+│ Internal components of this loop:  │
+│ • Tool Dispatch Map                │
+│   - youtube_detect                 │
+│   - youtube_transcript             │
+│   - summarize                      │
+│   - write_file                     │
+│   - load_skill                     │
+│ • Memory (memory/index.py)         │
+│   - SQLite conversation log        │
+│   - conversation_id + iteration    │
+└──────────┬─────────────────────────┘
+           │
+           ▼
+┌──────────────────────┐
+│ Skills (loop input)  │
+│ - skills/*.md menu   │
+│ - load_skill(...)    │
+└──────────────────────┘
 ```
 
 Gateway events use a shared JSON envelope:
