@@ -1,0 +1,58 @@
+[
+    {
+        "name": "youtube_detect",
+        "description": "Extract a YouTube video ID from a URL or text input.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": { "type": "string", "description": "Text containing a YouTube URL or video ID" }
+            },
+            "required": ["text"]
+        }
+    },
+    {
+        "name": "youtube_transcript",
+        "description": "Fetch the transcript of a YouTube video by its video ID.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "video_id": { "type": "string", "description": "The YouTube video ID" }
+            },
+            "required": ["video_id"]
+        }
+    },
+    {
+        "name": "summarize",
+        "description": "Summarize text using an LLM. Good for long transcripts.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": { "type": "string", "description": "The text to summarize" }
+            },
+            "required": ["text"]
+        }
+    },
+    {
+        "name": "write_file",
+        "description": "Write content to a file in the output/ folder.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": { "type": "string", "description": "Name of the file to create" },
+                "content": { "type": "string", "description": "Content to write" }
+            },
+            "required": ["filename", "content"]
+        }
+    },
+    {
+        "name": "load_skill",
+        "description": "Load specialized knowledge from a skill file.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Skill name to load (e.g. 'youtube')" }
+            },
+            "required": ["name"]
+        }
+    }
+]

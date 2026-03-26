@@ -14,3 +14,4 @@ build/
 .sisyphus
 .env
 manuclaw.db
+output/
