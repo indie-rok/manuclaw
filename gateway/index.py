@@ -1,162 +1,416 @@
-"""gateway — WebSocket server that orchestrates the full agent pipeline."""
+from __future__ import annotations
 
-import sys
 import asyncio
-import importlib.util
+import inspect
 import json
-import time
+import os
+import sys
+import uuid
 from pathlib import Path
+from typing import Any, Callable
+
+import httpx
 import websockets
+from dotenv import load_dotenv
 
-# Resolve project root
-ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-# Import hyphen-named modules via importlib
-def _load(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+from memory.index import Memory
+from tools.files import write_file
+from tools.skill_loader import load_skill
+from tools.summarize import summarize
+from tools.youtube import youtube_detect, youtube_transcript
 
-_subtask = _load("subtask_generator", ROOT / "subtask-generator" / "index.py")
-TaskBreaker = _subtask.TaskBreaker
+load_dotenv()
 
-_orch = _load("ai_loop_orch", ROOT / "ai-loop-orch" / "index.py")
-youtube_link_detection_tool = _orch.youtube_link_detection_tool
-youtube_transcript_fetch_tool = _orch.youtube_transcript_fetch_tool
-transcript_summarizer_tool = _orch.transcript_summarizer_tool
+TOOLS_PATH = PROJECT_ROOT / "tools.json"
 
-_memory = _load("memory_mod", ROOT / "memory" / "index.py")
-MemoryModule = _memory.MemoryModule
-MemoryData = _memory.MemoryData
-
-TOOLS_PATH = ROOT / "tooling-detection" / "tooling.json"
-CHAT_ID = 1
-USER_ID = 1
+DEFAULT_OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+MODEL = (
+    os.getenv("OPENROUTER_MODEL") or os.getenv("LLM_MODEL") or "moonshotai/kimi-k2.5"
+)
+MAX_ITERATIONS = 10
 
 
-async def run_pipeline(websocket, message: str):
-    """Orchestrate the full pipeline for one user message."""
-    memory = MemoryModule(user_id=USER_ID)
+def _resolve_chat_completions_url() -> str:
+    configured = (
+        os.getenv("OPENROUTER_BASE_URL")
+        or os.getenv("LLM_BASE_URL")
+        or DEFAULT_OPENROUTER_URL
+    ).rstrip("/")
+    if configured.endswith("/chat/completions"):
+        return configured
+    return f"{configured}/chat/completions"
 
-    async def send(text: str):
-        await websocket.send(text)
-        await asyncio.sleep(0.05)  # small flush gap
 
-    # ── Step 1: break task into subtasks ──────────────────────────────────
-    await send("GATEWAY:📡 Gateway received message")
-    await send("PLANNER:📋 Breaking task into subtasks...")
-    await send("PLANNER:   🌐 POST openrouter.ai/api/v1/chat/completions")
-    await send(f"PLANNER:   📤 model: moonshotai/kimi-k2.5 | prompt: {message[:60]}...")
-    try:
-        breaker = TaskBreaker(tools_config_path=str(TOOLS_PATH))
-        plan = await breaker.break_task(message)
-        await send("PLANNER:   📥 Response received from Kimi K2.5")
-        steps = plan.get("execution_plan", [])
-        await send(f"PLANNER:   Found {len(steps)} step(s) to execute.")
-        await send("PLANNER:")
-        await send("PLANNER:─── Execution Plan ───")
-        for s in steps:
-            await send(f"PLANNER:  {s['step']}. [{s.get('tool_to_use', '?')}] {s.get('subtask_name', '')}")
-            if s.get('description'):
-                await send(f"PLANNER:     → {s['description']}")
-        await send("PLANNER:──────────────────────")
-        await send("PLANNER:")
-    except Exception as e:
-        await send(f"ERROR:❌ Task planning failed: {e}")
-        await send("END")
-        memory.close()
+OPENROUTER_URL = _resolve_chat_completions_url()
+
+EVENT_USER_INPUT = "user_input"
+EVENT_LOOP_UPDATE = "loop_update"
+EVENT_TOOL_START = "tool_start"
+EVENT_TOOL_RESULT = "tool_result"
+EVENT_FINAL_RESPONSE = "final_response"
+EVENT_ERROR = "error"
+
+ALLOWED_EVENTS = {
+    EVENT_USER_INPUT,
+    EVENT_LOOP_UPDATE,
+    EVENT_TOOL_START,
+    EVENT_TOOL_RESULT,
+    EVENT_FINAL_RESPONSE,
+    EVENT_ERROR,
+}
+
+SYSTEM_PROMPT = (
+    "You are a helpful assistant that processes YouTube videos. "
+    "Use tools to detect a video id, fetch transcript, summarize it, and save the summary to output/. "
+    "Use load_skill when YouTube-specific guidance is needed."
+)
+
+TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
+    "youtube_detect": youtube_detect,
+    "youtube_transcript": youtube_transcript,
+    "summarize": summarize,
+    "write_file": write_file,
+    "load_skill": load_skill,
+}
+
+
+def load_tool_definitions() -> list[dict[str, Any]]:
+    return json.loads(TOOLS_PATH.read_text(encoding="utf-8"))
+
+
+TOOL_DEFINITIONS = load_tool_definitions()
+
+
+def _make_event(
+    event_type: str,
+    conversation_id: str,
+    iteration: int,
+    payload: dict[str, Any],
+    stop_reason: str | None = None,
+) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "type": event_type,
+        "conversation_id": conversation_id,
+        "iteration": iteration,
+        "payload": payload,
+    }
+    if stop_reason is not None:
+        event["stop_reason"] = stop_reason
+    return event
+
+
+async def _emit(
+    callback: Callable[[dict[str, Any]], Any] | None,
+    event: dict[str, Any],
+) -> None:
+    if callback is None:
         return
-
-    # ── Step 2: execute each step ─────────────────────────────────────────
-    context = {"raw_input": message}  # carries outputs between steps
-
-    for step in steps:
-        tool = step.get("tool_to_use", "")
-        name = step.get("subtask_name", tool)
-        await send(f"EXECUTOR:🔧 Step {step['step']}: {name}")
-
-        result = {}
-        response_code = 200
-
-        try:
-            if tool == "youtube_link_detection_tool":
-                result = youtube_link_detection_tool(context["raw_input"])
-                if result["error"]:
-                    raise ValueError(result["error"])
-                context["video_id"] = result["video_id"]
-                await send(f"EXECUTOR:   ✓ Video ID: {result['video_id']}")
-
-            elif tool == "youtube_transcript_fetch_tool":
-                result = youtube_transcript_fetch_tool(context["video_id"])
-                if result["error"]:
-                    raise ValueError(result["error"])
-                context["transcript_text"] = result["transcript_text"]
-                words = len(result["transcript_text"].split())
-                await send(f"EXECUTOR:   ✓ Transcript fetched ({words} words)")
-
-            elif tool == "transcript_summarizer_tool":
-                await send("EXECUTOR:   ⏳ Asking Kimi K2.5 to summarize...")
-                words_in = len(context['transcript_text'].split())
-                await send("EXECUTOR:   🌐 POST openrouter.ai/api/v1/chat/completions")
-                await send(f"EXECUTOR:   📤 model: moonshotai/kimi-k2.5 | input: {words_in} words")
-                result = await transcript_summarizer_tool(context["transcript_text"])
-                if result["error"]:
-                    raise ValueError(result["error"])
-                context["summary"] = result["summary"]
-                await send("EXECUTOR:   📥 Response received from Kimi K2.5")
-                await send("EXECUTOR:   ✓ Summary ready")
-
-            else:
-                await send(f"EXECUTOR:   ⚠ Unknown tool '{tool}', skipping.")
-                continue
-
-        except Exception as e:
-            response_code = 500
-            result = {"error": str(e)}
-            await send(f"ERROR:   ❌ Failed: {e}")
-
-        # ── save step to memory ────────────────────────────────────────────
-        memory.add_memory(MemoryData(
-            chat_id=CHAT_ID,
-            user_id=USER_ID,
-            prompt=message,
-            tool=tool,
-            response=json.dumps(result),
-            response_code=response_code,
-            timestamp=int(time.time()),
-        ))
-
-        if response_code != 200:
-            await send("ERROR:⛔ Pipeline stopped due to error.")
-            await send("END")
-            memory.close()
-            return
-
-    # ── Step 3: send final result ─────────────────────────────────────
-    await send("MEMORY:💾 Results saved to memory.")
-    summary = context.get("summary", "No summary produced.")
-    await send(f"RESULT:\n✅ Summary:\n{summary}")
-    await send("END")
-    memory.close()
+    outcome = callback(event)
+    if inspect.isawaitable(outcome):
+        await outcome
 
 
-async def handler(websocket):
-    print("[gateway] client connected")
+def _tool_result_message(result: dict[str, Any]) -> str:
+    return json.dumps(result, ensure_ascii=False)
+
+
+async def call_llm(
+    conversation_history: list[dict[str, Any]], tools: list[dict[str, Any]]
+) -> dict[str, Any]:
+    api_key = os.getenv("OPENROUTER_KEY") or os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENROUTER_KEY is missing")
+
+    messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for message in conversation_history:
+        role = message["role"]
+        if role == "user":
+            messages.append({"role": "user", "content": message["content"]})
+        elif role == "assistant":
+            assistant_message: dict[str, Any] = {
+                "role": "assistant",
+                "content": message.get("content") or "",
+            }
+            if message.get("tool_calls"):
+                assistant_message["tool_calls"] = message["tool_calls"]
+            messages.append(assistant_message)
+        elif role == "tool_result":
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": message["tool_use_id"],
+                    "content": message["content"],
+                }
+            )
+
+    api_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": item["name"],
+                "description": item.get("description", ""),
+                "parameters": item["input_schema"],
+            },
+        }
+        for item in tools
+    ]
+
+    request_payload = {
+        "model": MODEL,
+        "messages": messages,
+        "tools": api_tools,
+    }
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.post(
+            OPENROUTER_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=request_payload,
+        )
+        if response.status_code >= 400:
+            error_body = response.text[:2000]
+            raise RuntimeError(
+                f"LLM request failed ({response.status_code}) at {OPENROUTER_URL}: {error_body}"
+            )
+        body = response.json()
+
+    choice = body["choices"][0]
+    message = choice["message"]
+    raw_tool_calls = message.get("tool_calls", [])
+    parsed_tool_calls: list[dict[str, Any]] = []
+    for tool_call in raw_tool_calls:
+        arguments = tool_call["function"]["arguments"]
+        if isinstance(arguments, str):
+            arguments = json.loads(arguments)
+        parsed_tool_calls.append(
+            {
+                "id": tool_call["id"],
+                "name": tool_call["function"]["name"],
+                "input": arguments,
+            }
+        )
+
+    stop_reason = "tool_use" if parsed_tool_calls else "end_turn"
+    return {
+        "role": "assistant",
+        "content": message.get("content", ""),
+        "stop_reason": stop_reason,
+        "tool_calls": parsed_tool_calls,
+    }
+
+
+async def run_agent_loop(
+    user_message: str,
+    on_event: Callable[[dict[str, Any]], Any] | None = None,
+    memory: Memory | None = None,
+    conversation_id: str | None = None,
+) -> dict[str, Any]:
+    current_conversation_id = conversation_id or str(uuid.uuid4())
+    local_memory = memory or Memory()
+
+    await _emit(
+        on_event,
+        _make_event(
+            EVENT_USER_INPUT,
+            current_conversation_id,
+            0,
+            {"text": user_message},
+        ),
+    )
+    local_memory.save(current_conversation_id, "user", user_message, iteration=0)
+
+    conversation_history: list[dict[str, Any]] = [
+        {"role": "user", "content": user_message}
+    ]
+
+    for iteration in range(1, MAX_ITERATIONS + 1):
+        final_result = await _run_single_agent_iteration(
+            iteration=iteration,
+            conversation_history=conversation_history,
+            conversation_id=current_conversation_id,
+            memory=local_memory,
+            on_event=on_event,
+        )
+        if final_result is not None:
+            return final_result
+
+    message = f"max iterations reached ({MAX_ITERATIONS})"
+    local_memory.save(
+        current_conversation_id, "assistant", message, iteration=MAX_ITERATIONS + 1
+    )
+    await _emit(
+        on_event,
+        _make_event(
+            EVENT_ERROR,
+            current_conversation_id,
+            MAX_ITERATIONS + 1,
+            {"message": message},
+            stop_reason="error",
+        ),
+    )
+    return {
+        "conversation_id": current_conversation_id,
+        "role": "assistant",
+        "content": "",
+        "stop_reason": "error",
+        "tool_calls": [],
+    }
+
+
+async def _run_single_agent_iteration(
+    iteration: int,
+    conversation_history: list[dict[str, Any]],
+    conversation_id: str,
+    memory: Memory,
+    on_event: Callable[[dict[str, Any]], Any] | None,
+) -> dict[str, Any] | None:
+    await _emit(
+        on_event,
+        _make_event(
+            EVENT_LOOP_UPDATE,
+            conversation_id,
+            iteration,
+            {"status": "running"},
+            stop_reason="tool_use",
+        ),
+    )
+
+    llm_answer = await call_llm(conversation_history, TOOL_DEFINITIONS)
+    conversation_history.append(
+        {
+            "role": "assistant",
+            "content": llm_answer.get("content", ""),
+            "tool_calls": [
+                {
+                    "id": tool_call["id"],
+                    "type": "function",
+                    "function": {
+                        "name": tool_call["name"],
+                        "arguments": json.dumps(tool_call["input"], ensure_ascii=False),
+                    },
+                }
+                for tool_call in llm_answer.get("tool_calls", [])
+            ],
+        }
+    )
+
+    if llm_answer["stop_reason"] != "tool_use":
+        content = llm_answer.get("content") or ""
+        memory.save(conversation_id, "assistant", content, iteration=iteration)
+        await _emit(
+            on_event,
+            _make_event(
+                EVENT_FINAL_RESPONSE,
+                conversation_id,
+                iteration,
+                {"content": content},
+                stop_reason=llm_answer["stop_reason"],
+            ),
+        )
+        return {"conversation_id": conversation_id, **llm_answer}
+
+    for tool_call in llm_answer["tool_calls"]:
+        tool_name = tool_call["name"]
+        tool_input = tool_call.get("input", {})
+        await _emit(
+            on_event,
+            _make_event(
+                EVENT_TOOL_START,
+                conversation_id,
+                iteration,
+                {"tool_name": tool_name, "input": tool_input},
+                stop_reason="tool_use",
+            ),
+        )
+
+        handler = TOOL_HANDLERS.get(tool_name)
+        if handler is None:
+            result = {
+                "ok": False,
+                "tool_name": tool_name,
+                "data": None,
+                "error": f"unknown tool '{tool_name}'",
+            }
+        else:
+            raw = handler(**tool_input)
+            result = await raw if inspect.isawaitable(raw) else raw
+
+        result_text = _tool_result_message(result)
+        memory.save(
+            conversation_id,
+            "tool_result",
+            result_text,
+            iteration=iteration,
+            tool_name=tool_name,
+        )
+        conversation_history.append(
+            {
+                "role": "tool_result",
+                "tool_use_id": tool_call["id"],
+                "content": result_text,
+            }
+        )
+
+        await _emit(
+            on_event,
+            _make_event(
+                EVENT_TOOL_RESULT,
+                conversation_id,
+                iteration,
+                {"tool_name": tool_name, "result": result},
+                stop_reason="tool_use",
+            ),
+        )
+
+    return None
+
+
+async def _send_gateway_event(websocket: Any, event: dict[str, Any]) -> None:
+    await websocket.send(json.dumps(event, ensure_ascii=False))
+
+
+async def _process_client_message(websocket: Any, message: str, db: Memory) -> None:
+    conversation_id = str(uuid.uuid4())
+
+    async def send_event_to_client(event: dict[str, Any]) -> None:
+        await _send_gateway_event(websocket, event)
+
     try:
-        async for message in websocket:
-            print(f"[gateway] received: {message}")
-            await run_pipeline(websocket, message)
-    except websockets.exceptions.ConnectionClosedOK:
-        print("[gateway] client disconnected")
-    except websockets.exceptions.ConnectionClosedError:
-        print("[gateway] client disconnected")
+        await run_agent_loop(
+            message,
+            on_event=send_event_to_client,
+            memory=db,
+            conversation_id=conversation_id,
+        )
+    except Exception as exc:
+        error_event = _make_event(
+            EVENT_ERROR,
+            conversation_id,
+            0,
+            {"message": str(exc)},
+            stop_reason="error",
+        )
+        await _send_gateway_event(websocket, error_event)
 
 
-async def main():
+async def handler(websocket: Any) -> None:
+    db = Memory()
+    try:
+        async for incoming in websocket:
+            await _process_client_message(websocket, incoming, db)
+    finally:
+        db.close()
+
+
+async def main() -> None:
     async with websockets.serve(handler, "localhost", 8765):
-        print("[gateway] server started on ws://localhost:8765")
         await asyncio.Future()
 
 

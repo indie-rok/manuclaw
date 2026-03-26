@@ -1,73 +1,66 @@
+from __future__ import annotations
+
 import sqlite3
-from typing import NamedTuple
+import time
 
 
-class MemoryData(NamedTuple):
-    """
-    Represents the data structure for the memory module, containing the following fields:
-    - chat_id: An integer representing the identifier for the chat session.
-    - user_id: An integer representing the identifier for the user associated with the memory entry.
-    - prompt: A string containing a summarize of the prompt or input that led to action taken.
-    - tool: A string indicating the tool or method used to generate the response.
-    - response: A string containing the response generated based on the prompt and tool.
-    - response_code : An integer representing the status code of the response, indicating success or failure of the action taken.
-    - timestamp: An integer representing the time when the memory entry was created, typically stored as a
-    """
-    chat_id: int
-    user_id: int
-    prompt: str
-    tool: str
-    response: str
-    response_code: int
-    timestamp: int
+class Memory:
+    def __init__(self, db_path: str = "manuclaw.db") -> None:
+        self.connection = sqlite3.connect(db_path)
+        self.connection.row_factory = sqlite3.Row
+        self._create_table()
 
-
-class MemoryModule:
-    def __init__(self, user_id, db_path='manuclaw.db'):
-        self.conn = sqlite3.connect(db_path)
-        self.user_id = user_id
-        self.create_table()
-
-    def create_table(self) -> None:
-        with self.conn:
-            sql = f'''
-                CREATE TABLE IF NOT EXISTS memory{self.user_id} (
+    def _create_table(self) -> None:
+        with self.connection:
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    chat_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    prompt TEXT NOT NULL,
-                    tool TEXT NOT NULL,
-                    response TEXT NOT NULL,
-                    response_code INTEGER NOT NULL,
-                    timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+                    conversation_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    tool_name TEXT,
+                    content TEXT NOT NULL,
+                    iteration INTEGER NOT NULL,
+                    timestamp INTEGER NOT NULL
                 )
-            '''
-            self.conn.execute(sql)
+                """
+            )
 
-    def add_memory(self, data: MemoryData) -> None:
-        with self.conn:
-            self.conn.execute(f'''
-                INSERT INTO memory{data.user_id} (
-                    chat_id, user_id, prompt, tool, response, response_code, timestamp
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                data.chat_id,
-                data.user_id,
-                data.prompt,
-                data.tool,
-                data.response,
-                data.response_code,
-                data.timestamp
-            ))
+    def save(
+        self,
+        conversation_id: str,
+        role: str,
+        content: str,
+        iteration: int,
+        tool_name: str | None = None,
+    ) -> None:
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO memory (conversation_id, role, tool_name, content, iteration, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    conversation_id,
+                    role,
+                    tool_name,
+                    content,
+                    iteration,
+                    int(time.time()),
+                ),
+            )
 
-    def get_memories(self, user_id: int, limit=10) -> list:
-        cursor = self.conn.cursor()
-        sql = f"""SELECT
-            id, chat_id, user_id, prompt, tool, response, response_code, timestamp
-            FROM memory{user_id}
-            ORDER BY timestamp DESC LIMIT {limit}"""
-        cursor.execute(sql)
-        return cursor.fetchall()
+    def get_history(self, conversation_id: str) -> list[dict[str, object | None]]:
+        cursor = self.connection.execute(
+            """
+            SELECT conversation_id, role, tool_name, content, iteration, timestamp
+            FROM memory
+            WHERE conversation_id = ?
+            ORDER BY iteration ASC, timestamp ASC, id ASC
+            """,
+            (conversation_id,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
 
-    def close(self):
-        self.conn.close()
+    def close(self) -> None:
+        self.connection.close()

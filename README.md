@@ -1,93 +1,99 @@
 # manuclaw
 
-A learning project that builds a simple AI agent from scratch — a terminal UI that talks to an orchestrating gateway, which uses an LLM to plan and execute tasks.
+Manuclaw is a learning project that demonstrates a real LLM agent loop for a YouTube summarizer workflow.
 
-The demo use case: paste a YouTube URL and the agent will detect the video, fetch its transcript, and summarize it using Kimi K2.5.
+## What it does
 
-## How it works
+You paste a YouTube URL in a Textual TUI, then the gateway agent:
+
+1. detects the video ID,
+2. fetches transcript text,
+3. summarizes it,
+4. saves the result under `output/`.
+
+The loop is tool-driven (`while stop_reason == "tool_use"`), not a preplanned pipeline.
+
+## Architecture
 
 ```
-┌─────────────┐     WebSocket      ┌──────────────────┐
-│  manuclaw   │ ◄──────────────►   │     gateway      │
-│   (TUI)     │   streams status   │  (orchestrator)  │
-└─────────────┘                    └────────┬─────────┘
-                                            │
-                              ┌─────────────▼──────────────┐
-                              │      agent runtime         │
-                              │                            │
-                              │  ┌───────────┐ ┌─────────┐ │
-                              │  │  subtask  │ │ ai-loop │ │
-                              │  │ generator │ │  orch   │ │
-                              │  └───────────┘ └─────────┘ │
-                              │        ┌─────────┐         │
-                              │        │ memory  │         │
-                              │        │ (SQLite)│         │
-                              │        └─────────┘         │
-                              └────────────────────────────┘
+manuclaw.py (TUI)  <->  gateway/index.py (agent loop + websocket)
+                               |
+                               +-- dispatch map (5 fixed tools)
+                               |    - youtube_detect
+                               |    - youtube_transcript
+                               |    - summarize
+                               |    - write_file
+                               |    - load_skill
+                               |
+                               +-- memory/index.py (SQLite conversation history)
 ```
 
-1. **You type** a YouTube URL in the TUI
-2. **Gateway** receives it via WebSocket and sends it to the **subtask generator**
-3. **Subtask generator** calls Kimi K2.5 (via OpenRouter) to break the task into steps based on available tools defined in `tooling.json`
-4. **Gateway** executes each step using the **ai-loop-orch** tools:
-   - `youtube_link_detection_tool` — extracts the video ID
-   - `youtube_transcript_fetch_tool` — fetches the transcript
-   - `transcript_summarizer_tool` — summarizes via Kimi K2.5
-5. Each step result is saved to **memory** (SQLite)
-6. The TUI shows real-time progress, color-coded by phase
+Gateway events use a shared JSON envelope:
 
-## Setup
+```json
+{
+  "type": "tool_result",
+  "conversation_id": "...",
+  "iteration": 3,
+  "payload": {},
+  "stop_reason": "tool_use"
+}
+```
+
+Event types:
+- `user_input`
+- `loop_update`
+- `tool_start`
+- `tool_result`
+- `final_response`
+- `error`
+
+## Setup (venv)
 
 ```bash
-pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
-Create a `.env` file with your OpenRouter API key:
+Create `.env`:
 
 ```
-OPENROUTER_API_KEY=sk-or-...
 OPENROUTER_KEY=sk-or-...
+OPENROUTER_API_KEY=sk-or-...
 ```
 
-## Running
+## Run
 
-Terminal 1 — start the gateway:
+Terminal 1:
 
 ```bash
-python gateway/index.py
+.venv/bin/python gateway/index.py
 ```
 
-Terminal 2 — start the TUI:
+Terminal 2:
 
 ```bash
-python manuclaw.py
+.venv/bin/python manuclaw.py
 ```
 
-Then type a YouTube URL (e.g. `https://www.youtube.com/watch?v=dQw4w9WgXcQ`) and hit Enter.
+## Tests
 
-## TUI keybindings
-
-| Key | Action |
-|-----|--------|
-| `Enter` | Send message |
-| `Ctrl+B` | Toggle memory viewer (shows stored tool executions) |
-| `Ctrl+C` | Quit |
+```bash
+.venv/bin/python -m pytest tests -v
+```
 
 ## Project structure
 
 ```
-manuclaw.py                    # TUI — Textual chat interface
-gateway/index.py               # WebSocket server — orchestrates the pipeline
-ai-loop-orch/index.py          # Tool implementations (YouTube tools)
-subtask-generator/index.py     # LLM-based task planner
-tooling-detection/tooling.json # Tool definitions and execution flow
-memory/index.py                # SQLite memory module
+manuclaw.py
+gateway/index.py
+memory/index.py
+tools/
+  youtube.py
+  summarize.py
+  files.py
+  skill_loader.py
+tools.json
+skills/youtube.md
+tests/
 ```
-
-## Tech stack
-
-- **Textual** — TUI framework
-- **Kimi K2.5** (`moonshotai/kimi-k2.5`) via OpenRouter — LLM for planning and summarization
-- **websockets** — gateway ↔ TUI communication
-- **youtube-transcript-api** — transcript fetching
-- **SQLite** — memory storage

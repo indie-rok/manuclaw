@@ -13,5 +13,8 @@ build/
 *.pyc
 .sisyphus
 .env
+.env.copy
 manuclaw.db
 output/
+.pytest_cache/
+.ruff_cache/
